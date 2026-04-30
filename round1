@@ -1,0 +1,132 @@
+from fastapi import FastAPI
+from datetime import datetime
+from dateutil.parser import parse
+from typing import List
+
+app = FastAPI()
+
+# ---- MOCK DATA ---- #
+
+staff_db = [
+    {
+        "id": 1,
+        "name": "Alice",
+        "role": "nurse",
+        "hours_this_week": 32,
+        "max_hours": 40,
+        "overtime_ok": False,
+        "past_accept_rate": 0.8,
+        "last_shift_end": "2026-05-01T18:00",
+        "availability": [("2026-05-02T08:00", "2026-05-02T18:00")]
+    },
+    {
+        "id": 2,
+        "name": "Bob",
+        "role": "nurse",
+        "hours_this_week": 20,
+        "max_hours": 40,
+        "overtime_ok": True,
+        "past_accept_rate": 0.6,
+        "last_shift_end": "2026-05-01T12:00",
+        "availability": [("2026-05-02T09:00", "2026-05-02T17:00")]
+    }
+]
+
+# ---- HELPERS ---- #
+
+def to_dt(t):
+    return parse(t)
+
+def hours_between(t1, t2):
+    return (to_dt(t2) - to_dt(t1)).total_seconds() / 3600
+
+def shift_duration(shift):
+    return hours_between(shift["start"], shift["end"])
+
+def is_available(staff, shift):
+    for start, end in staff["availability"]:
+        if to_dt(start) <= to_dt(shift["start"]) and to_dt(end) >= to_dt(shift["end"]):
+            return True
+    return False
+
+def has_required_rest(staff, shift):
+    rest_hours = hours_between(staff["last_shift_end"], shift["start"])
+    return rest_hours >= 8
+
+def is_perfect_availability(staff, shift):
+    for start, end in staff["availability"]:
+        if start == shift["start"] and end == shift["end"]:
+            return True
+    return False
+
+# ---- CORE LOGIC ---- #
+
+def is_eligible(staff, shift):
+    if staff["role"] != shift["role"]:
+        return False
+    if not is_available(staff, shift):
+        return False
+    if staff["hours_this_week"] >= staff["max_hours"] and not staff["overtime_ok"]:
+        return False
+    if not has_required_rest(staff, shift):
+        return False
+    return True
+
+def score_staff(staff, shift):
+    score = 0
+
+    # Acceptance likelihood
+    score += staff["past_accept_rate"] * 40
+
+    # Hours balance
+    utilization = staff["hours_this_week"] / staff["max_hours"]
+    score += (1 - utilization) * 25
+
+    # Rest bonus
+    rest = hours_between(staff["last_shift_end"], shift["start"])
+    if rest > 12:
+        score += 15
+    elif rest > 8:
+        score += 5
+
+    # Availability quality
+    if is_perfect_availability(staff, shift):
+        score += 10
+    else:
+        score += 3
+
+    # Overtime penalty
+    if staff["hours_this_week"] + shift_duration(shift) > staff["max_hours"]:
+        score -= 20
+
+    return round(score, 2)
+
+def match_staff(staff_list, shift):
+    eligible = [s for s in staff_list if is_eligible(s, shift)]
+
+    scored = []
+    for s in eligible:
+        scored.append({
+            "id": s["id"],
+            "name": s["name"],
+            "score": score_staff(s, shift)
+        })
+
+    ranked = sorted(scored, key=lambda x: x["score"], reverse=True)
+    return ranked[:5]
+
+# ---- API ENDPOINT ---- #
+import os
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+@app.post("/match")
+def match(shift: dict):
+    results = match_staff(staff_db, shift)
+    return {
+        "shift": shift,
+        "matches": results
+    }
